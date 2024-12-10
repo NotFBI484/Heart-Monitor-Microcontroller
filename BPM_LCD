@@ -1,0 +1,166 @@
+/*
+ * File:   BPMcode.c
+ * Author: Yassen Teaama
+ *
+ * Created on April 5, 2024, 12:35 AM
+ */
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <stdio.h>
+
+#define HEARTBEAT_THRESHOLD 3500 // Adjust based on your sensor output
+#define DEBOUNCE_COUNT 25000 // Simple debounce for heartbeat detection
+
+#define F_CPU 8000000UL
+#define LCD PORTA
+#define EN 7
+#define RW 6
+#define RS 5
+
+volatile unsigned int heartBeatCount = 0;
+volatile unsigned long sysTick = 0; // System tick for timing
+unsigned int bpm = 0;
+
+
+
+
+void lcdcmd(unsigned char cmd) {
+    LCD.OUT = cmd & 0xF0; //upper nibble
+    PORTD.OUT &= ~(1 << RS);  // RS = 0 for command
+    PORTD.OUT &= ~(1 << RW);  // RW = 0 for write
+    PORTD.OUT |= (1 << EN);   // Enable high
+    _delay_ms(20);
+    PORTD.OUT &= ~(1 << EN);   // Enable low
+    LCD.OUT = cmd << 4;
+    PORTD.OUT |= (1 << EN);   // Enable high
+    _delay_ms(20);
+    PORTD.OUT &= ~(1 << EN);   // Enable low
+    _delay_ms(3);
+}
+
+void lcddata(unsigned char data) {
+    LCD.OUT =  data & 0xF0;
+    PORTD.OUT |= (1 << RS);   // RS = 1 for data
+    PORTD.OUT &= ~(1 << RW);   // RW = 0 for write
+    PORTD.OUT |= (1 << EN);   // Enable high
+    _delay_ms(20);
+    PORTD.OUT &= ~(1 << EN);   // Enable low
+    LCD.OUT = data << 4;
+    PORTD.OUT |= (1 << EN);   // Enable high
+    _delay_ms(20);
+    PORTD.OUT &= ~(1 << EN);   // Enable low
+    _delay_ms(20);
+}
+
+void lcd_init() {
+    PORTA.DIRSET = 0b11111111;    // Set data port as output
+    PORTD.DIRSET = 0xFF; // Set control lines as output
+    PORTD.OUT &= ~(1 << EN); // Initialize EN low
+    _delay_ms(20); // Wait for LCD to power up
+
+    lcdcmd(0x33);
+    lcdcmd(0x32);
+    lcdcmd(0x28); // 28,32,33 initialize lcd to 4-bit mode
+    lcdcmd(0x0E); //cursor on
+    lcdcmd(0x01); // Clear display
+    _delay_ms(2);
+}
+
+void lcd_print(const char* str) {
+    unsigned int i = 0;
+    while(str[i] != '\0') {
+        lcddata(str[i]);
+        i++;
+    }
+}
+
+// ADC interrupt service routine
+ISR(ADC0_RESRDY_vect) {
+    static unsigned int debounce = 0;
+    uint16_t adcResult = ADC0.RES; // Read ADC result
+    if(adcResult > HEARTBEAT_THRESHOLD) {
+        if(debounce >= DEBOUNCE_COUNT) {
+            heartBeatCount++;
+            debounce = 0; // Reset debounce counter after a heart beat is detected
+        } else {
+            debounce++;
+        }
+    } else {
+        debounce = 0; // Reset debounce if the signal drops below threshold
+    }
+}
+
+// Timer/Counter A interrupt service routine for every 1 second
+ISR(TCA0_OVF_vect) {
+    sysTick++; // Increment system tick
+    TCA0.SINGLE.INTFLAGS = TCA_SINGLE_OVF_bm; // Clear the overflow interrupt flag
+}
+
+void initADC() {
+    VREF.ADC0REF = 0b10000010; // Set the ADC reference level to 4.096V
+    ADC0.CTRLC = 0x00; // Select minimum clock divide
+    ADC0.CTRLA = 0b00000011; // Enable ADC, single ended mode, 12 bit
+    ADC0.MUXPOS = 0x03; // Select PD3 (AIN3) as the ADC input
+    ADC0.INTCTRL = 0b00000001; // Enable the ADC interrupt
+    ADC0.COMMAND = 0x01; // Start conversion
+}
+
+void initTimer() {
+    TCA0.SINGLE.CTRLA = 0b00001101; // Enable timer, prescaler div1024 (~1s overflow for 16MHz clock)
+    TCA0.SINGLE.PER = 15625; // Set period for 1s overflow
+    TCA0.SINGLE.INTCTRL = TCA_SINGLE_OVF_bm; // Enable overflow interrupt
+}
+
+void setup() {
+    // Set internal clock frequency to 16 MHz (assuming this is default)
+    // Enable global interrupts
+    sei();
+
+    initADC();
+    initTimer();
+    
+    PORTD.DIRCLR = PIN3_bm; // Configure PD3 as input for ADC
+    PORTA.DIRSET = PIN0_bm | PIN1_bm;
+}
+
+
+
+int main(void) {
+    lcd_init();
+    lcd_print("BPM: ");
+
+    PORTA.DIRCLR = PIN3_bm; // Set PA3 as input
+
+    while (1) {
+        setup();
+    
+        if(sysTick >= 6) { // Every 6 seconds, calculate BPM
+            bpm = (heartBeatCount * 10)/2; // Calculate BPM
+            heartBeatCount = 0; // Reset heart beat count
+            sysTick = 0; // Reset system tick
+
+            
+            if(bpm > 160 || bpm < 60 ){
+                // Update BPM on LCD
+                lcdcmd(0xC0); // Move cursor to the position after "BPM is: "
+                lcd_print("Calculating..."); // Print BPM on LCD
+             
+                
+            }
+            
+            else{
+                // Update BPM on LCD
+                lcdcmd(0xC0); // Move cursor to the position after "BPM is: "
+                char bpm_string[14]; // Buffer to store BPM as string (one extra for null terminator)
+                sprintf(bpm_string, "%d            ", bpm); // Convert BPM to string
+                lcd_print(bpm_string); // Print BPM on LCD
+            }
+            
+            
+        }
+        
+    }
+    return 0;
+}
